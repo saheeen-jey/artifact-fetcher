@@ -2,12 +2,15 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,12 +21,25 @@ type Downloader struct {
 	ChunkSize   int64
 	Resume      bool
 	Retries     int
+	Progress    func(Progress)
 }
 
 type Options struct {
-	URL    string
-	Output string
+	URL      string
+	Output   string
+	Checksum string
 }
+
+type Progress struct {
+	Chunk     int
+	Chunks    int
+	Bytes     int64
+	Total     int64
+	Retries   int
+	Completed bool
+}
+
+var ErrChecksumMismatch = errors.New("checksum mismatch")
 
 type Chunk struct {
 	Index int
@@ -123,6 +139,9 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 					errorMu.Unlock()
 					return
 				}
+				if d.Progress != nil {
+					d.Progress(Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: chunk.End - chunk.Start + 1, Total: remote.Size, Completed: true})
+				}
 			}
 		}()
 	}
@@ -151,10 +170,32 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
+	if opts.Checksum != "" {
+		actual, err := checksumFile(temporary)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(actual, opts.Checksum) {
+			return fmt.Errorf("%w: got %s, want %s", ErrChecksumMismatch, actual, opts.Checksum)
+		}
+	}
 	if err := os.Rename(temporary, opts.Output); err != nil {
 		return err
 	}
 	return os.Remove(manifestPath)
+}
+
+func checksumFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func retryChunk(ctx context.Context, client *http.Client, remote RemoteFile, file *os.File, chunk Chunk, retries int) error {

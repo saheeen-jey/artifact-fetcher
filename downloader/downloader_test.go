@@ -2,6 +2,8 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -51,8 +53,9 @@ func TestDownloadPublishesCompleteRangeFile(t *testing.T) {
 	defer server.Close()
 
 	output := filepath.Join(t.TempDir(), "artifact.bin")
+	digest := sha256.Sum256(data)
 	d := Downloader{Client: server.Client(), Connections: 3, ChunkSize: 7}
-	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output, Checksum: hex.EncodeToString(digest[:])}); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(output)
@@ -64,6 +67,29 @@ func TestDownloadPublishesCompleteRangeFile(t *testing.T) {
 	}
 	if _, err := os.Stat(output + ".part"); !os.IsNotExist(err) {
 		t.Fatalf("temporary file still exists: %v", err)
+	}
+}
+
+func TestDownloadRejectsChecksumMismatch(t *testing.T) {
+	data := []byte("checksum-test")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data)
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data))}
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output, Checksum: "0000000000000000000000000000000000000000000000000000000000000000"}); err == nil {
+		t.Fatal("checksum mismatch unexpectedly succeeded")
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("unverified output was published: %v", err)
 	}
 }
 
