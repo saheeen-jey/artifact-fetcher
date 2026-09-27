@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -296,5 +297,76 @@ func TestDownloadResumesCompletedChunks(t *testing.T) {
 	defer mu.Unlock()
 	if rangeRequests[0] != 1 || rangeRequests[7] != 1 {
 		t.Fatalf("completed ranges were redownloaded: %#v", rangeRequests)
+	}
+}
+
+func TestDownloadResumesWithNewPresignedURL(t *testing.T) {
+	data := []byte("stable-object")
+	var mu sync.Mutex
+	failed := false
+	rangeRequests := make(map[int64]int)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			return
+		}
+		var start, end int64
+		if _, err := fmt.Sscanf(request.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(writer, "missing range", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		rangeRequests[start]++
+		shouldFail := start == 7 && !failed
+		if shouldFail {
+			failed = true
+		}
+		mu.Unlock()
+		if shouldFail {
+			http.Error(writer, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data[start : end+1])
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	firstURL := server.URL + "?X-Amz-Signature=first&X-Amz-Credential=one&version=v1"
+	secondURL := server.URL + "?X-Amz-Signature=second&X-Amz-Credential=two&version=v1"
+	first := Downloader{Client: server.Client(), Connections: 1, ChunkSize: 7, Retries: 0}
+	if err := first.Download(context.Background(), Options{URL: firstURL, Output: output}); err == nil {
+		t.Fatal("first download unexpectedly succeeded")
+	}
+	manifestData, err := os.ReadFile(output + ".part.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifestData), "X-Amz-Signature") || strings.Contains(string(manifestData), "first") {
+		t.Fatalf("manifest contains presigned URL data: %s", manifestData)
+	}
+	second := Downloader{Client: server.Client(), Connections: 1, ChunkSize: 7, Resume: true, Retries: 0}
+	if err := second.Download(context.Background(), Options{URL: secondURL, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(data) {
+		t.Fatalf("downloaded %q, want %q", actual, data)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if rangeRequests[0] != 1 {
+		t.Fatalf("completed range was redownloaded: %#v", rangeRequests)
+	}
+}
+
+func TestSourceIdentityPreservesObjectQuery(t *testing.T) {
+	identity := sourceIdentity("https://example.test/object?versionId=7&X-Amz-Signature=secret")
+	if identity != "https://example.test/object?versionId=7" {
+		t.Fatalf("got %q, want stable object identity", identity)
 	}
 }

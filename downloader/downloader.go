@@ -77,10 +77,10 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	if err := os.MkdirAll(filepath.Dir(temporary), 0755); err != nil {
 		return err
 	}
-	state := manifest{URL: remote.URL, Size: remote.Size, ChunkSize: d.ChunkSize, Chunks: make([]bool, len(chunks))}
+	state := manifest{Identity: sourceIdentity(remote.URL), Size: remote.Size, ChunkSize: d.ChunkSize, Chunks: make([]bool, len(chunks))}
 	if d.Resume {
 		if existing, loadErr := loadManifest(manifestPath); loadErr == nil {
-			if existing.URL != state.URL || existing.Size != state.Size || existing.ChunkSize != state.ChunkSize || len(existing.Chunks) != len(state.Chunks) {
+			if manifestIdentity(existing) != state.Identity || existing.Size != state.Size || existing.ChunkSize != state.ChunkSize || len(existing.Chunks) != len(state.Chunks) {
 				return errors.New("resume manifest does not match the remote file")
 			}
 			state = existing

@@ -106,3 +106,19 @@ func isPresignedURL(rawURL string) bool {
 	query := parsed.Query()
 	return query.Get("X-Amz-Signature") != "" || query.Get("X-Amz-Credential") != ""
 }
+
+func sourceIdentity(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	for key := range query {
+		if strings.HasPrefix(strings.ToLower(key), "x-amz-") {
+			query.Del(key)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
+}

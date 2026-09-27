@@ -62,7 +62,7 @@ aws s3 presign `
   --sha256 EXPECTED_SHA256
 ```
 
-If a presigned URL is rejected or expires during a transfer, the client reports that a new URL is required. The resume manifest currently binds the exact source URL, so remove the stale `.part` and manifest files before restarting with a newly generated URL.
+If a presigned URL is rejected or expires during a transfer, the client reports that a new URL is required. Resume manifests bind to the stable object URL with `X-Amz-*` signing parameters removed, so a newly generated presigned URL for the same object can resume the incomplete chunks. New manifests do not store the temporary signature.
 
 ## Development
 

@@ -7,10 +7,21 @@ import (
 )
 
 type manifest struct {
-	URL       string `json:"url"`
+	Identity  string `json:"identity"`
+	URL       string `json:"url,omitempty"`
 	Size      int64  `json:"size"`
 	ChunkSize int64  `json:"chunk_size"`
 	Chunks    []bool `json:"chunks"`
+}
+
+func manifestIdentity(state manifest) string {
+	if state.Identity != "" {
+		return state.Identity
+	}
+	if state.URL != "" {
+		return sourceIdentity(state.URL)
+	}
+	return ""
 }
 
 func loadManifest(path string) (manifest, error) {
