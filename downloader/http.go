@@ -37,6 +37,9 @@ func discover(ctx context.Context, client *http.Client, rawURL string) (RemoteFi
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+			return discoverWithRange(ctx, client, rawURL)
+		}
 		return RemoteFile{}, fmt.Errorf("metadata request returned HTTP %d", resp.StatusCode)
 	}
 	if resp.ContentLength < 0 {
@@ -46,6 +49,27 @@ func discover(ctx context.Context, client *http.Client, rawURL string) (RemoteFi
 		return RemoteFile{}, ErrRangeUnsupported
 	}
 	return RemoteFile{URL: rawURL, Size: resp.ContentLength, AcceptRanges: true}, nil
+}
+
+func discoverWithRange(ctx context.Context, client *http.Client, rawURL string) (RemoteFile, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return RemoteFile{}, fmt.Errorf("create range metadata request: %w", err)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return RemoteFile{}, fmt.Errorf("discover remote file with range: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPartialContent {
+		return RemoteFile{}, fmt.Errorf("range metadata request returned HTTP %d", resp.StatusCode)
+	}
+	var start, end, size int64
+	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &size); err != nil || start != 0 || end != 0 || size < 1 {
+		return RemoteFile{}, errors.New("range metadata response has no valid Content-Range")
+	}
+	return RemoteFile{URL: rawURL, Size: size, AcceptRanges: true}, nil
 }
 
 func requestRange(ctx context.Context, client *http.Client, remote RemoteFile, start, end int64) (io.ReadCloser, error) {

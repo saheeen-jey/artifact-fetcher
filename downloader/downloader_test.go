@@ -119,6 +119,38 @@ func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
 	}
 }
 
+func TestDownloadUsesRangeMetadataWhenHeadIsForbidden(t *testing.T) {
+	data := []byte("head-forbidden")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			http.Error(writer, "HEAD is not signed", http.StatusForbidden)
+			return
+		}
+		if request.Header.Get("Range") == "bytes=0-0" {
+			writer.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", len(data)))
+			writer.WriteHeader(http.StatusPartialContent)
+			_, _ = writer.Write(data[:1])
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data)
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data))}
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(data) {
+		t.Fatalf("downloaded %q, want %q", actual, data)
+	}
+}
+
 func TestDownloadResumesCompletedChunks(t *testing.T) {
 	data := []byte("abcdefghijklmnopqrstuvwxyz0123456789")
 	var mu sync.Mutex
