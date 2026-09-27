@@ -1,0 +1,4 @@
+artifact-fetcher.exe
+*.part
+*.part.json
+*.part.json.tmp
