@@ -93,6 +93,32 @@ func TestDownloadRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
+	data := []byte("retry-me")
+	failed := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			return
+		}
+		if !failed {
+			failed = true
+			http.Error(writer, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data)
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data)), Retries: 1}
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDownloadResumesCompletedChunks(t *testing.T) {
 	data := []byte("abcdefghijklmnopqrstuvwxyz0123456789")
 	var mu sync.Mutex
