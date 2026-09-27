@@ -6,6 +6,8 @@ The download client that expects your network to fail.
 
 This is not positioned as a novel general-purpose downloader. Parallel HTTP downloading already exists in tools such as curl, Wget, aria2, rclone, and the AWS CLI. The project focuses on a narrower reliability workflow: crash-safe chunk state, cheap recovery after interruptions, presigned-URL support without embedded AWS credentials, fault-injection coverage, and verification before publication.
 
+**Status:** working, AWS-validated MVP. The project has been tested against a real private S3 object using a presigned URL. It does not currently include an AI model or AI-controlled recovery; AI-assisted diagnostics remain a future, explicitly bounded feature.
+
 ## The differentiator: a recovery receipt
 
 The one feature this project deliberately develops beyond “another parallel downloader” is an explainable recovery receipt. The final progress event reports how many chunks were reused, how many needed retries, how many bytes were avoided after interruption, whether the checksum passed, and whether the verified file was published. This turns recovery from an opaque speed optimization into evidence a CI job can archive and audit. It is available as human-readable output or as a final JSON event with `--json`.
@@ -84,6 +86,48 @@ The integration tests use deterministic local HTTP servers to cover range placem
 | AWS CLI | Native AWS authentication and S3 transfers | Credential-free presigned URL consumption with deterministic local failure tests |
 
 The project should not claim to replace these tools generally. Its claim is narrower: it makes interrupted large artifact delivery measurable and cheap to recover.
+
+## Credentials and security
+
+The downloader does not accept, store, or manage AWS credentials. For private S3 objects, credentials stay with the AWS CLI or another trusted presigning workflow; `artifact-fetcher` receives only a temporary URL. Never commit access keys, secret keys, session tokens, passwords, or live presigned URLs.
+
+New resume manifests store a normalized object identity rather than the full presigned URL, so temporary `X-Amz-*` signatures are not written to disk. The repository's `X-Amz-*` values are fake localhost test fixtures, not credentials.
+
+The final artifact is written to a `.part` file and is renamed to the requested output only after all chunks and the optional checksum pass. Keep the AWS identity used for testing limited to the specific test bucket.
+
+## GitHub publishing
+
+The repository is intended to be published at:
+
+```text
+https://github.com/saheeen-jey/artifact-fetcher
+```
+
+Before pushing, scan the repository for credentials and verify the worktree:
+
+```powershell
+git status --short
+git diff --check
+git ls-files
+```
+
+Configure a GitHub remote and push using GitHub authentication already configured on your machine:
+
+```powershell
+git remote add origin https://github.com/saheeen-jey/artifact-fetcher.git
+git branch -M main
+git push -u origin main
+```
+
+Do not put a GitHub token in the remote URL. Use Git Credential Manager, GitHub CLI authentication, or SSH instead.
+
+## Roadmap
+
+- GitHub Actions CI and release packaging
+- CGO-enabled race-detector validation
+- Reusable fault-injection test server package
+- Timing and throughput metrics in the recovery receipt
+- Optional local AI diagnostics that analyze redacted failure events but never receive credentials or silently change download policy
 
 ## Scope
 
