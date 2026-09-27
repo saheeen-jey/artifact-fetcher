@@ -13,9 +13,17 @@ import (
 var ErrRangeUnsupported = errors.New("server does not support byte ranges")
 
 type RemoteFile struct {
-	URL         string
-	Size        int64
+	URL          string
+	Size         int64
 	AcceptRanges bool
+}
+
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
 func discover(ctx context.Context, client *http.Client, rawURL string) (RemoteFile, error) {
@@ -52,7 +60,7 @@ func requestRange(ctx context.Context, client *http.Client, remote RemoteFile, s
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
-		return nil, fmt.Errorf("range request returned HTTP %d", resp.StatusCode)
+		return nil, &HTTPError{StatusCode: resp.StatusCode}
 	}
 	return resp.Body, nil
 }

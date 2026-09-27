@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -63,5 +64,60 @@ func TestDownloadPublishesCompleteRangeFile(t *testing.T) {
 	}
 	if _, err := os.Stat(output + ".part"); !os.IsNotExist(err) {
 		t.Fatalf("temporary file still exists: %v", err)
+	}
+}
+
+func TestDownloadResumesCompletedChunks(t *testing.T) {
+	data := []byte("abcdefghijklmnopqrstuvwxyz0123456789")
+	var mu sync.Mutex
+	failed := false
+	rangeRequests := make(map[int64]int)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			return
+		}
+		var start, end int64
+		if _, err := fmt.Sscanf(request.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(writer, "missing range", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		rangeRequests[start]++
+		shouldFail := start == 14 && !failed
+		if shouldFail {
+			failed = true
+		}
+		mu.Unlock()
+		if shouldFail {
+			http.Error(writer, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data[start : end+1])
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	first := Downloader{Client: server.Client(), Connections: 1, ChunkSize: 7, Retries: 0}
+	if err := first.Download(context.Background(), Options{URL: server.URL, Output: output}); err == nil {
+		t.Fatal("first download unexpectedly succeeded")
+	}
+	second := Downloader{Client: server.Client(), Connections: 1, ChunkSize: 7, Resume: true, Retries: 0}
+	if err := second.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(data) {
+		t.Fatalf("downloaded %q, want %q", actual, data)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if rangeRequests[0] != 1 || rangeRequests[7] != 1 {
+		t.Fatalf("completed ranges were redownloaded: %#v", rangeRequests)
 	}
 }

@@ -3,17 +3,21 @@ package downloader
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type Downloader struct {
 	Client      *http.Client
 	Connections int
 	ChunkSize   int64
+	Resume      bool
+	Retries     int
 }
 
 type Options struct {
@@ -45,10 +49,26 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	}
 	chunks := planChunks(remote.Size, d.ChunkSize)
 	temporary := opts.Output + ".part"
+	manifestPath := temporary + ".json"
 	if err := os.MkdirAll(filepath.Dir(temporary), 0755); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+	state := manifest{URL: remote.URL, Size: remote.Size, ChunkSize: d.ChunkSize, Chunks: make([]bool, len(chunks))}
+	if d.Resume {
+		if existing, loadErr := loadManifest(manifestPath); loadErr == nil {
+			if existing.URL != state.URL || existing.Size != state.Size || existing.ChunkSize != state.ChunkSize || len(existing.Chunks) != len(state.Chunks) {
+				return errors.New("resume manifest does not match the remote file")
+			}
+			state = existing
+		}
+	} else {
+		_ = os.Remove(manifestPath)
+	}
+	flags := os.O_CREATE | os.O_RDWR
+	if !d.Resume {
+		flags |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(temporary, flags, 0600)
 	if err != nil {
 		return err
 	}
@@ -56,11 +76,17 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	if err := file.Truncate(remote.Size); err != nil {
 		return err
 	}
+	if err := saveManifest(manifestPath, state); err != nil {
+		return err
+	}
 
 	jobs := make(chan Chunk)
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var workers sync.WaitGroup
 	var firstErr error
 	var errorMu sync.Mutex
+	var stateMu sync.Mutex
 	workerCount := connections
 	if workerCount > len(chunks) && len(chunks) > 0 {
 		workerCount = len(chunks)
@@ -70,10 +96,29 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 		go func() {
 			defer workers.Done()
 			for chunk := range jobs {
-				if err := downloadChunk(ctx, client, remote, file, chunk); err != nil {
+				stateMu.Lock()
+				complete := state.Chunks[chunk.Index]
+				stateMu.Unlock()
+				if complete {
+					continue
+				}
+				if err := retryChunk(workCtx, client, remote, file, chunk, d.Retries); err != nil {
 					errorMu.Lock()
 					if firstErr == nil {
 						firstErr = err
+					}
+					errorMu.Unlock()
+					cancel()
+					return
+				}
+				stateMu.Lock()
+				state.Chunks[chunk.Index] = true
+				err := saveManifest(manifestPath, state)
+				stateMu.Unlock()
+				if err != nil {
+					errorMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("save resume manifest: %w", err)
 					}
 					errorMu.Unlock()
 					return
@@ -90,9 +135,9 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 		}
 		select {
 		case jobs <- chunk:
-		case <-ctx.Done():
+		case <-workCtx.Done():
 			errorMu.Lock()
-			if firstErr == nil {
+			if firstErr == nil && ctx.Err() != nil {
 				firstErr = ctx.Err()
 			}
 			errorMu.Unlock()
@@ -106,7 +151,45 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporary, opts.Output)
+	if err := os.Rename(temporary, opts.Output); err != nil {
+		return err
+	}
+	return os.Remove(manifestPath)
+}
+
+func retryChunk(ctx context.Context, client *http.Client, remote RemoteFile, file *os.File, chunk Chunk, retries int) error {
+	if retries < 0 {
+		retries = 0
+	}
+	for attempt := 0; ; attempt++ {
+		err := downloadChunk(ctx, client, remote, file, chunk)
+		if err == nil || attempt >= retries || !retryable(err) {
+			return err
+		}
+		backoff := time.Duration(1<<min(attempt, 5)) * 100 * time.Millisecond
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+}
+
+func retryable(err error) bool {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusRequestTimeout || httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= 500
+	}
+	return true
+}
+
+func min(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func downloadChunk(ctx context.Context, client *http.Client, remote RemoteFile, file *os.File, chunk Chunk) error {
