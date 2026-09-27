@@ -31,12 +31,16 @@ type Options struct {
 }
 
 type Progress struct {
-	Chunk     int
-	Chunks    int
-	Bytes     int64
-	Total     int64
-	Retries   int
-	Completed bool
+	Chunk           int
+	Chunks          int
+	Bytes           int64
+	Total           int64
+	Retries         int
+	Completed       bool
+	Reused          bool
+	CompletedChunks int
+	ReusedChunks    int
+	RetriedChunks   int
 }
 
 var ErrChecksumMismatch = errors.New("checksum mismatch")
@@ -103,6 +107,17 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	var firstErr error
 	var errorMu sync.Mutex
 	var stateMu sync.Mutex
+	completedBytes := int64(0)
+	completedChunks := 0
+	reusedChunks := 0
+	retriedChunks := 0
+	for index, complete := range state.Chunks {
+		if complete {
+			completedBytes += chunks[index].End - chunks[index].Start + 1
+			completedChunks++
+			reusedChunks++
+		}
+	}
 	workerCount := connections
 	if workerCount > len(chunks) && len(chunks) > 0 {
 		workerCount = len(chunks)
@@ -114,11 +129,16 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 			for chunk := range jobs {
 				stateMu.Lock()
 				complete := state.Chunks[chunk.Index]
+				progress := Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Completed: complete, Reused: complete, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks}
 				stateMu.Unlock()
 				if complete {
+					if d.Progress != nil {
+						d.Progress(progress)
+					}
 					continue
 				}
-				if err := retryChunk(workCtx, client, remote, file, chunk, d.Retries); err != nil {
+				retries, err := retryChunk(workCtx, client, remote, file, chunk, d.Retries)
+				if err != nil {
 					errorMu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -129,7 +149,13 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 				}
 				stateMu.Lock()
 				state.Chunks[chunk.Index] = true
-				err := saveManifest(manifestPath, state)
+				err = saveManifest(manifestPath, state)
+				completedBytes += chunk.End - chunk.Start + 1
+				completedChunks++
+				if retries > 0 {
+					retriedChunks++
+				}
+				progress = Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Retries: retries, Completed: true, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks}
 				stateMu.Unlock()
 				if err != nil {
 					errorMu.Lock()
@@ -140,7 +166,7 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 					return
 				}
 				if d.Progress != nil {
-					d.Progress(Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: chunk.End - chunk.Start + 1, Total: remote.Size, Completed: true})
+					d.Progress(progress)
 				}
 			}
 		}()
@@ -198,14 +224,14 @@ func checksumFile(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func retryChunk(ctx context.Context, client *http.Client, remote RemoteFile, file *os.File, chunk Chunk, retries int) error {
+func retryChunk(ctx context.Context, client *http.Client, remote RemoteFile, file *os.File, chunk Chunk, retries int) (int, error) {
 	if retries < 0 {
 		retries = 0
 	}
 	for attempt := 0; ; attempt++ {
 		err := downloadChunk(ctx, client, remote, file, chunk)
 		if err == nil || attempt >= retries || !retryable(err) {
-			return err
+			return attempt, err
 		}
 		backoff := time.Duration(1<<min(attempt, 5)) * 100 * time.Millisecond
 		timer := time.NewTimer(backoff)
@@ -213,7 +239,7 @@ func retryChunk(ctx context.Context, client *http.Client, remote RemoteFile, fil
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return attempt, ctx.Err()
 		}
 	}
 }

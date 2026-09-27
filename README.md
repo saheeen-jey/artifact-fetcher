@@ -4,6 +4,8 @@ The download client that expects your network to fail.
 
 `artifact-fetcher` is a Go CLI for downloading large artifacts from HTTP and S3-compatible storage through presigned URLs. It downloads byte ranges concurrently, persists completed chunks in a JSON manifest, retries transient failures, verifies SHA-256, and atomically publishes only verified files.
 
+This is not positioned as a novel general-purpose downloader. Parallel HTTP downloading already exists in tools such as curl, Wget, aria2, rclone, and the AWS CLI. The project focuses on a narrower reliability workflow: crash-safe chunk state, cheap recovery after interruptions, presigned-URL support without embedded AWS credentials, fault-injection coverage, and verification before publication.
+
 ## Build
 
 ```powershell
@@ -14,16 +16,16 @@ go build -o artifact-fetcher.exe .\cmd\artifact-fetcher
 
 ```powershell
 .\artifact-fetcher.exe download `
-  "https://example.com/large-file.iso" `
   --output .\large-file.iso `
   --connections 8 `
   --chunk-size 8388608 `
   --resume `
   --retries 3 `
-  --sha256 EXPECTED_SHA256
+  --sha256 EXPECTED_SHA256 `
+  "https://example.com/large-file.iso"
 ```
 
-The server must provide `Content-Length` and `Accept-Ranges: bytes`. Interrupted downloads keep `.part` and `.part.json` beside the requested output. The final output is renamed into place only after all chunks and the optional checksum pass.
+The server must provide `Content-Length` and support byte ranges. The client uses `HEAD` metadata when available and falls back to a one-byte ranged `GET`, which supports S3 presigned URLs signed for `GET`. Interrupted downloads keep `.part` and `.part.json` beside the requested output. The final output is renamed into place only after all chunks and the optional checksum pass.
 
 Use `--json` for one JSON progress object per completed chunk:
 
@@ -54,7 +56,7 @@ aws s3 presign `
   --sha256 EXPECTED_SHA256
 ```
 
-If the presigned URL expires during a transfer, generate a new URL and resume while retaining the `.part` files.
+If a presigned URL is rejected or expires during a transfer, the client reports that a new URL is required. The resume manifest currently binds the exact source URL, so remove the stale `.part` and manifest files before restarting with a newly generated URL.
 
 ## Development
 
@@ -64,7 +66,7 @@ go test ./...
 go vet ./...
 ```
 
-The integration tests use deterministic local HTTP servers to cover range placement, atomic publication, checksum failures, and resume after a transient failure.
+The integration tests use deterministic local HTTP servers to cover range placement, atomic publication, checksum failures, resume after a transient failure, dropped connections, corrupted responses, retry metrics, and expired presigned URLs.
 
 ## Scope
 

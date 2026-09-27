@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -96,6 +98,7 @@ func TestDownloadRejectsChecksumMismatch(t *testing.T) {
 func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
 	data := []byte("retry-me")
 	failed := false
+	var progress Progress
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodHead {
 			writer.Header().Set("Accept-Ranges", "bytes")
@@ -113,9 +116,85 @@ func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
 	defer server.Close()
 
 	output := filepath.Join(t.TempDir(), "artifact.bin")
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data)), Retries: 1, Progress: func(value Progress) { progress = value }}
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Retries != 1 || progress.RetriedChunks != 1 || progress.Bytes != int64(len(data)) {
+		t.Fatalf("got progress %#v, want one retry and %d completed bytes", progress, len(data))
+	}
+}
+
+func TestDownloadRetriesDroppedConnection(t *testing.T) {
+	data := []byte("connection-drop")
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(data)))
+			return
+		}
+		if attempts.Add(1) == 1 {
+			hijacker, ok := writer.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support connection hijacking")
+			}
+			connection, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = fmt.Fprintf(connection, "HTTP/1.1 206 Partial Content\r\nContent-Length: %d\r\n\r\nshort", len(data))
+			_ = connection.Close()
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(data)
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "artifact.bin")
 	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data)), Retries: 1}
 	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDownloadDoesNotPublishCorruptedResponse(t *testing.T) {
+	expected := []byte("expected-data")
+	corrupted := append([]byte(nil), expected...)
+	corrupted[0] = 'X'
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodHead {
+			writer.Header().Set("Accept-Ranges", "bytes")
+			writer.Header().Set("Content-Length", fmt.Sprint(len(expected)))
+			return
+		}
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write(corrupted)
+	}))
+	defer server.Close()
+
+	digest := sha256.Sum256(expected)
+	output := filepath.Join(t.TempDir(), "artifact.bin")
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(expected))}
+	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output, Checksum: hex.EncodeToString(digest[:])}); !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("got %v, want checksum mismatch", err)
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("corrupted output was published: %v", err)
+	}
+}
+
+func TestDownloadReportsExpiredPresignedURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Error(writer, "Request has expired", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	d := Downloader{Client: server.Client(), ChunkSize: 1}
+	err := d.Download(context.Background(), Options{URL: server.URL + "?X-Amz-Signature=test", Output: filepath.Join(t.TempDir(), "artifact.bin")})
+	if !errors.Is(err, ErrPresignedURLExpired) {
+		t.Fatalf("got %v, want expired presigned URL error", err)
 	}
 }
 

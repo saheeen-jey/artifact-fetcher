@@ -2,3 +2,7 @@ artifact-fetcher.exe
 *.part
 *.part.json
 *.part.json.tmp
+test-artifact.bin
+downloaded.bin
+lorem.txt
+lorem-downloaded.txt

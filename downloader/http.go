@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
 
 var ErrRangeUnsupported = errors.New("server does not support byte ranges")
+var ErrPresignedURLExpired = errors.New("presigned URL was rejected or may be expired")
 
 type RemoteFile struct {
 	URL          string
@@ -63,6 +65,9 @@ func discoverWithRange(ctx context.Context, client *http.Client, rawURL string) 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
+		if resp.StatusCode == http.StatusForbidden && isPresignedURL(rawURL) {
+			return RemoteFile{}, fmt.Errorf("%w: generate a new presigned URL", ErrPresignedURLExpired)
+		}
 		return RemoteFile{}, fmt.Errorf("range metadata request returned HTTP %d", resp.StatusCode)
 	}
 	var start, end, size int64
@@ -83,8 +88,21 @@ func requestRange(ctx context.Context, client *http.Client, remote RemoteFile, s
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusPartialContent {
+		if resp.StatusCode == http.StatusForbidden && isPresignedURL(remote.URL) {
+			resp.Body.Close()
+			return nil, fmt.Errorf("%w: generate a new presigned URL", ErrPresignedURLExpired)
+		}
 		resp.Body.Close()
 		return nil, &HTTPError{StatusCode: resp.StatusCode}
 	}
 	return resp.Body, nil
+}
+
+func isPresignedURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("X-Amz-Signature") != "" || query.Get("X-Amz-Credential") != ""
 }

@@ -49,7 +49,11 @@ func download(args []string) {
 			_ = json.NewEncoder(os.Stdout).Encode(progress)
 			return
 		}
-		fmt.Printf("completed chunk %d/%d (%d/%d bytes)\n", progress.Chunk+1, progress.Chunks, progress.Bytes, progress.Total)
+		status := "completed"
+		if progress.Reused {
+			status = "reused"
+		}
+		fmt.Printf("%s chunk %d/%d (%d/%d bytes, retries=%d, reused=%d, retried_chunks=%d)\n", status, progress.Chunk+1, progress.Chunks, progress.Bytes, progress.Total, progress.Retries, progress.ReusedChunks, progress.RetriedChunks)
 	}
 	if err := d.Download(context.Background(), downloader.Options{URL: flags.Arg(0), Output: *output, Checksum: *checksum}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
