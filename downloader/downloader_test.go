@@ -56,7 +56,12 @@ func TestDownloadPublishesCompleteRangeFile(t *testing.T) {
 
 	output := filepath.Join(t.TempDir(), "artifact.bin")
 	digest := sha256.Sum256(data)
-	d := Downloader{Client: server.Client(), Connections: 3, ChunkSize: 7}
+	var final Progress
+	d := Downloader{Client: server.Client(), Connections: 3, ChunkSize: 7, Progress: func(progress Progress) {
+		if progress.Final {
+			final = progress
+		}
+	}}
 	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output, Checksum: hex.EncodeToString(digest[:])}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +74,9 @@ func TestDownloadPublishesCompleteRangeFile(t *testing.T) {
 	}
 	if _, err := os.Stat(output + ".part"); !os.IsNotExist(err) {
 		t.Fatalf("temporary file still exists: %v", err)
+	}
+	if !final.Final || !final.Published || !final.ChecksumVerified || final.CompletedChunks != 6 {
+		t.Fatalf("got final receipt %#v", final)
 	}
 }
 
@@ -99,6 +107,7 @@ func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
 	data := []byte("retry-me")
 	failed := false
 	var progress Progress
+	sawRetry := false
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodHead {
 			writer.Header().Set("Accept-Ranges", "bytes")
@@ -116,11 +125,16 @@ func TestDownloadRetriesTransientRangeFailure(t *testing.T) {
 	defer server.Close()
 
 	output := filepath.Join(t.TempDir(), "artifact.bin")
-	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data)), Retries: 1, Progress: func(value Progress) { progress = value }}
+	d := Downloader{Client: server.Client(), ChunkSize: int64(len(data)), Retries: 1, Progress: func(value Progress) {
+		progress = value
+		if value.Retries == 1 {
+			sawRetry = true
+		}
+	}}
 	if err := d.Download(context.Background(), Options{URL: server.URL, Output: output}); err != nil {
 		t.Fatal(err)
 	}
-	if progress.Retries != 1 || progress.RetriedChunks != 1 || progress.Bytes != int64(len(data)) {
+	if !sawRetry || progress.RetriedChunks != 1 || progress.Bytes != int64(len(data)) {
 		t.Fatalf("got progress %#v, want one retry and %d completed bytes", progress, len(data))
 	}
 }

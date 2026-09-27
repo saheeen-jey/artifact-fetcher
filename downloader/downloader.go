@@ -31,16 +31,20 @@ type Options struct {
 }
 
 type Progress struct {
-	Chunk           int
-	Chunks          int
-	Bytes           int64
-	Total           int64
-	Retries         int
-	Completed       bool
-	Reused          bool
-	CompletedChunks int
-	ReusedChunks    int
-	RetriedChunks   int
+	Chunk            int   `json:"chunk,omitempty"`
+	Chunks           int   `json:"chunks,omitempty"`
+	Bytes            int64 `json:"bytes"`
+	Total            int64 `json:"total"`
+	Retries          int   `json:"retries,omitempty"`
+	Completed        bool  `json:"completed"`
+	Reused           bool  `json:"reused,omitempty"`
+	Final            bool  `json:"final,omitempty"`
+	Published        bool  `json:"published,omitempty"`
+	ChecksumVerified bool  `json:"checksum_verified,omitempty"`
+	CompletedChunks  int   `json:"completed_chunks"`
+	ReusedChunks     int   `json:"reused_chunks"`
+	RetriedChunks    int   `json:"retried_chunks"`
+	BytesAvoided     int64 `json:"bytes_avoided"`
 }
 
 var ErrChecksumMismatch = errors.New("checksum mismatch")
@@ -111,11 +115,14 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	completedChunks := 0
 	reusedChunks := 0
 	retriedChunks := 0
+	bytesAvoided := int64(0)
 	for index, complete := range state.Chunks {
 		if complete {
-			completedBytes += chunks[index].End - chunks[index].Start + 1
+			chunkBytes := chunks[index].End - chunks[index].Start + 1
+			completedBytes += chunkBytes
 			completedChunks++
 			reusedChunks++
+			bytesAvoided += chunkBytes
 		}
 	}
 	workerCount := connections
@@ -129,7 +136,7 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 			for chunk := range jobs {
 				stateMu.Lock()
 				complete := state.Chunks[chunk.Index]
-				progress := Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Completed: complete, Reused: complete, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks}
+				progress := Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Completed: complete, Reused: complete, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks, BytesAvoided: bytesAvoided}
 				stateMu.Unlock()
 				if complete {
 					if d.Progress != nil {
@@ -155,7 +162,7 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 				if retries > 0 {
 					retriedChunks++
 				}
-				progress = Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Retries: retries, Completed: true, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks}
+				progress = Progress{Chunk: chunk.Index, Chunks: len(chunks), Bytes: completedBytes, Total: remote.Size, Retries: retries, Completed: true, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks, BytesAvoided: bytesAvoided}
 				stateMu.Unlock()
 				if err != nil {
 					errorMu.Lock()
@@ -207,6 +214,9 @@ func (d *Downloader) Download(ctx context.Context, opts Options) error {
 	}
 	if err := os.Rename(temporary, opts.Output); err != nil {
 		return err
+	}
+	if d.Progress != nil {
+		d.Progress(Progress{Chunks: len(chunks), Bytes: remote.Size, Total: remote.Size, Final: true, Published: true, ChecksumVerified: opts.Checksum != "", Completed: true, CompletedChunks: completedChunks, ReusedChunks: reusedChunks, RetriedChunks: retriedChunks, BytesAvoided: bytesAvoided})
 	}
 	return os.Remove(manifestPath)
 }

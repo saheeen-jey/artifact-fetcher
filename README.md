@@ -6,6 +6,10 @@ The download client that expects your network to fail.
 
 This is not positioned as a novel general-purpose downloader. Parallel HTTP downloading already exists in tools such as curl, Wget, aria2, rclone, and the AWS CLI. The project focuses on a narrower reliability workflow: crash-safe chunk state, cheap recovery after interruptions, presigned-URL support without embedded AWS credentials, fault-injection coverage, and verification before publication.
 
+## The differentiator: a recovery receipt
+
+The one feature this project deliberately develops beyond “another parallel downloader” is an explainable recovery receipt. The final progress event reports how many chunks were reused, how many needed retries, how many bytes were avoided after interruption, whether the checksum passed, and whether the verified file was published. This turns recovery from an opaque speed optimization into evidence a CI job can archive and audit. It is available as human-readable output or as a final JSON event with `--json`.
+
 ## Build
 
 ```powershell
@@ -32,6 +36,8 @@ Use `--json` for one JSON progress object per completed chunk:
 ```powershell
 .\artifact-fetcher.exe download URL --output .\artifact.bin --resume --json
 ```
+
+The final JSON object has `final: true` and acts as the recovery receipt. Its `bytes_avoided`, `reused_chunks`, `retried_chunks`, `checksum_verified`, and `published` fields are the primary reliability metrics.
 
 Verify an existing file:
 
@@ -67,6 +73,17 @@ go vet ./...
 ```
 
 The integration tests use deterministic local HTTP servers to cover range placement, atomic publication, checksum failures, resume after a transient failure, dropped connections, corrupted responses, retry metrics, and expired presigned URLs.
+
+## Market boundary
+
+| Tool | Strong at | artifact-fetcher’s deliberate focus |
+| --- | --- | --- |
+| aria2 | Broad protocols, segmented downloads, Metalink piece checksums, RPC | A small CI-oriented workflow for presigned URLs and recovery evidence |
+| curl | Universal HTTP transfer, ranges, retries, rich transport diagnostics | Crash-safe chunk state and a publish-or-not recovery receipt |
+| rclone | Many storage backends, sync semantics, multithreaded transfers | One large artifact, explicit chunk reuse, and verification before publication |
+| AWS CLI | Native AWS authentication and S3 transfers | Credential-free presigned URL consumption with deterministic local failure tests |
+
+The project should not claim to replace these tools generally. Its claim is narrower: it makes interrupted large artifact delivery measurable and cheap to recover.
 
 ## Scope
 

@@ -49,6 +49,14 @@ func download(args []string) {
 			_ = json.NewEncoder(os.Stdout).Encode(progress)
 			return
 		}
+		if progress.Final {
+			checksumStatus := "not requested"
+			if progress.ChecksumVerified {
+				checksumStatus = "verified"
+			}
+			fmt.Printf("published %d chunks (%d reused, %d retried, %d bytes avoided, checksum %s)\n", progress.CompletedChunks, progress.ReusedChunks, progress.RetriedChunks, progress.BytesAvoided, checksumStatus)
+			return
+		}
 		status := "completed"
 		if progress.Reused {
 			status = "reused"
